@@ -1,0 +1,29 @@
+# docker-compose do analytics-service (mesmo estilo do auth-service do Alexandre).
+#
+# O serviço lê a fila SQS e grava no DynamoDB. Como o código usa os endpoints
+# padrão da AWS (não aceita um DynamoDB local), este compose se conecta à AWS de verdade
+# (sandbox da FIAP). As credenciais ficam no arquivo .env, que NÃO vai para o GitHub.
+#
+# Uso:  docker compose up --build
+services:
+  analytics-service:
+    build: ./analytics-service-main
+    ports:
+      - "8005:8005"
+    env_file:
+      - ./analytics-service-main/.env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- DynamoDB Local (OPCIONAL, para o compose único do grupo) ---
+  # O PDF pede um DynamoDB Local no compose. Para usá-lo, o app.py precisa aceitar
+  # um endpoint customizado (hoje não aceita). Deixe comentado até o grupo decidir.
+  # dynamodb-local:
+  #   image: amazon/dynamodb-local:latest
+  #   ports:
+  #     - "8000:8000"
+  #   command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"

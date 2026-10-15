@@ -1,105 +1,102 @@
 # analytics-service (Python)
 
-Este é o serviço de análise (analytics) do projeto ToggleMaster. Ele é um *worker* de backend e não possui uma API pública (exceto `/health`).
+Este é o serviço de análise (analytics) do projeto ToggleMaster. Ele é um *worker* de backend e não possui API pública (exceto `/health`). Sua função é consumir os eventos da fila **AWS SQS** (preenchida pelo `evaluation-service`) e gravá-los em uma tabela do **AWS DynamoDB**.
 
-Sua única função é:
-1.  Ouvir constantemente a fila do **AWS SQS** (que o `evaluation-service` preenche).
-2.  Consumir as mensagens de evento da fila.
-3.  Gravar os dados de análise em uma tabela do **AWS DynamoDB**.
+**IMPORTANTE:** Este serviço precisa de credenciais da AWS e de uma fila SQS e uma tabela DynamoDB já criadas. Sem elas, ele encerra na partida.
 
 ## 📦 Pré-requisitos (Local)
 
-* [Python](https://www.python.org/) (versão 3.9 ou superior)
-* **Credenciais da AWS:** Este serviço **DEVE** ter credenciais da AWS para acessar SQS e DynamoDB. Configure-as em seu terminal (via `aws configure`) ou defina as variáveis de ambiente:
-    * `AWS_ACCESS_KEY_ID`
-    * `AWS_SECRET_ACCESS_KEY`
-    * `AWS_SESSION_TOKEN` (se estiver usando o AWS Academy)
-* **Recursos da AWS:** Você precisa ter criado a Fila SQS e a Tabela DynamoDB no console.
+* [Docker](https://www.docker.com/) (Docker Desktop no Windows/Mac)
+* [AWS CLI](https://aws.amazon.com/cli/) configurado com as suas credenciais
+* **Credenciais da AWS:** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` e, no AWS Academy, `AWS_SESSION_TOKEN` (elas expiram a cada sessão)
+* **Recursos da AWS:** uma fila SQS (Standard) e uma tabela DynamoDB
 
-## 🚀 Preparando o DynamoDB
+## 🗄️ Preparando a Fila e o DynamoDB
 
-Este serviço espera que uma tabela específica exista no DynamoDB.
+**Fila SQS** (anote a `QueueUrl` retornada):
 
-**Nome da Tabela:** `ToggleMasterAnalytics`
-**Chave Primária (Partition Key):** `event_id` (do tipo String)
+```
+aws sqs create-queue --queue-name togglemaster-events
+```
 
-Você pode criar esta tabela usando o console da AWS ou com o seguinte comando da AWS CLI:
+**Tabela DynamoDB:** nome `ToggleMasterAnalytics`, chave primária `event_id` (String):
 
-```bash
+```
 aws dynamodb create-table \
     --table-name ToggleMasterAnalytics \
-    --attribute-definitions \
-        AttributeName=event_id,AttributeType=S \
-    --key-schema \
-        AttributeName=event_id,KeyType=HASH \
-    --provisioned-throughput \
-        ReadCapacityUnits=1,WriteCapacityUnits=1
+    --attribute-definitions AttributeName=event_id,AttributeType=S \
+    --key-schema AttributeName=event_id,KeyType=HASH \
+    --billing-mode PAY_PER_REQUEST
 ```
-(Nota: O throughput provisionado acima é o mínimo possível, ideal para o free tier/testes).
 
-## 🚀 Rodando Localmente
+## 🚀 Rodando com Docker
+
 **1. Clone o repositório** e entre na pasta `analytics-service`.
 
-**2. Configure as Variáveis de Ambiente:** Crie um arquivo chamado `.env` na raiz desta pasta (`analytics-service/`) com o seguinte conteúdo. **Garanta que suas credenciais da AWS também estejam configuradas no seu ambiente.**
-```.env
-# Porta que este serviço (health check) irá rodar
-PORT="8005"
+**2. Configure as variáveis de ambiente.** Crie um arquivo `.env` dentro da pasta `analytics-service-main`, sem aspas e sem espaço depois do `=`:
 
-# --- Configuração da AWS ---
-# Cole a URL da fila SQS que você criou
-AWS_SQS_URL="httpsiso://[sqs.us-east-1.amazonaws.com/123456789012/sua-fila](https://sqs.us-east-1.amazonaws.com/123456789012/sua-fila)"
-
-# Nome da tabela DynamoDB que você criou
-AWS_DYNAMODB_TABLE="ToggleMasterAnalytics"
-
-# Região dos seus serviços SQS e DynamoDB
-AWS_REGION="us-east-1"
+```
+PORT=8005
+AWS_REGION=us-east-1
+AWS_SQS_URL=URL_DA_SUA_FILA
+AWS_DYNAMODB_TABLE=ToggleMasterAnalytics
+AWS_ACCESS_KEY_ID=SUA_CHAVE
+AWS_SECRET_ACCESS_KEY=SUA_CHAVE_SECRETA
+AWS_SESSION_TOKEN=SEU_TOKEN
 ```
 
-**3. Instale as Dependências:**
-```bash
-pip install -r requirements.txt
+**Nunca envie o `.env` para o GitHub.** Ele já está no `.gitignore`.
+
+**3. Monte a imagem:**
+
+```
+docker build -t analytics-service ./analytics-service-main
 ```
 
-**4. Inicie o Serviço:**
-```bash
-gunicorn --bind 0.0.0.0:8005 app:app
+**4. Inicie o container:**
+
 ```
-O servidor estará rodando em `http://localhost:8005`. Você verá logs no terminal assim que o worker SQS iniciar e (eventualmente) processar mensagens.
+docker run --rm -p 8005:8005 --env-file analytics-service-main/.env analytics-service
+```
+
+Ou, com o Docker Compose:
+
+```
+docker compose up --build
+```
+
+O serviço estará em `http://localhost:8005`. No terminal você verá `Clientes Boto3 inicializados` e `Iniciando o worker SQS...`.
 
 ## 🧪 Testando o Serviço
 
-Testar este serviço é diferente. Você não vai chamar uma API dele.
+Este serviço não tem API para chamar. O teste é enviar mensagens para a fila e ver os dados chegarem ao DynamoDB.
 
 **1. Verifique a Saúde:**
-```bash
+
+```
 curl http://localhost:8005/health
 ```
-Saída esperada: `{"status":"ok"}``
 
-**2. Gere Eventos:**
+Saída esperada: `{"status":"ok"}`
 
-- Vá para o `evaluation-service` (que deve estar rodando) e faça algumas requisições de avaliação:
-```bash
-curl "http://localhost:8004/evaluate?user_id=test-user-1&flag_name=enable-new-dashboard"
-curl "http://localhost:8004/evaluate?user_id=test-user-2&flag_name=enable-new-dashboard"
+**2. Gere Eventos.** Envie uma mensagem de teste para a fila (ou faça requisições ao `evaluation-service`):
+
 ```
-- **Alternativa:** Envie uma mensagem manualmente pelo Console da AWS SQS.
-
-**3. Observe os Logs:**
-
-No terminal do `analytics-service`, você deverá ver os logs aparecendo, indicando que as mensagens foram recebidas e salvas no DynamoDB:
-```bash
-INFO:Iniciando o worker SQS...
-INFO:Recebidas 2 mensagens.
-INFO:Processando mensagem ID: ...
-INFO:Evento ... (Flag: enable-new-dashboard) salvo no DynamoDB.
-INFO:Processando mensagem ID: ...
-INFO:Evento ... (Flag: enable-new-dashboard) salvo no DynamoDB.
+aws sqs send-message \
+    --queue-url URL_DA_SUA_FILA \
+    --message-body '{"user_id":"teste","flag_name":"enable-new-dashboard","result":true,"timestamp":"2026-10-15T12:00:00Z"}'
 ```
+
+No PowerShell, grave o JSON em um arquivo `msg.json` e use `--message-body file://msg.json`.
+
+**3. Observe os Logs.** No terminal do container, você deve ver:
+
+`Recebidas 1 mensagens.` e `Evento ... (Flag: enable-new-dashboard) salvo no DynamoDB.`
 
 **4. Verifique o DynamoDB:**
 
-Vá até o console da AWS, abra o **DynamoDB**, selecione a tabela `ToggleMasterAnalytics` e clique em "Explore table items".
+```
+aws dynamodb scan --table-name ToggleMasterAnalytics --max-items 5
+```
 
-Você verá os itens que o worker acabou de inserir.
+Saída esperada: os itens recém-criados, com `event_id`, `user_id`, `flag_name`, `result` e `timestamp`.
