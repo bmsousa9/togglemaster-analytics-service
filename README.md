@@ -100,3 +100,87 @@ aws dynamodb scan --table-name ToggleMasterAnalytics --max-items 5
 ```
 
 Saída esperada: os itens recém-criados, com `event_id`, `user_id`, `flag_name`, `result` e `timestamp`.
+
+## ☁️ Publicando a imagem no AWS ECR (conta da equipe)
+
+Na conta compartilhada do grupo, a fila SQS é a mesma do `evaluation-service` (`evaluation-events`), então não é preciso criá-la. Use a URL dela em `AWS_SQS_URL`.
+
+**1. Monte a imagem com a tag `v1`:**
+
+```
+docker build -t analytics-service:v1 ./analytics-service-main
+```
+
+**2. Crie o repositório no ECR** (uma vez só):
+
+```
+aws ecr create-repository --repository-name analytics-service --region us-east-1
+```
+
+**3. Faça login, nomeie e envie a imagem.** Troque `ACCOUNT_ID` pelo ID da conta AWS:
+
+```
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
+docker tag analytics-service:v1 ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/analytics-service:v1
+docker push ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/analytics-service:v1
+```
+
+**4. Confira que a tag `v1` chegou:**
+
+```
+aws ecr describe-images --repository-name analytics-service --region us-east-1 --query "imageDetails[].imageTags"
+```
+
+Saída esperada: `["v1"]`.
+
+> Se usar um perfil do AWS CLI diferente do padrão, acrescente `--profile NOME_DO_PERFIL` aos comandos `aws`.
+
+## ☸️ Deploy no EKS
+
+Os manifestos ficam na pasta `k8s/` e usam o namespace `microservices`, compartilhado com os outros serviços:
+
+| Arquivo | O que faz |
+|---|---|
+| `01-configmap.yaml` | Porta, região, URL da fila SQS e nome da tabela DynamoDB |
+| `02-secret.yaml.example` | Modelo do Secret com as credenciais da AWS (não é aplicado) |
+| `03-deployment.yaml` | Pod do serviço, com `requests`, `limits` e probes em `/health` |
+| `04-service.yaml` | Service `ClusterIP` na porta 8005 |
+| `05-hpa.yaml` | HPA por CPU (alvo de 70%, de 1 a 5 pods) |
+
+**1. Conecte o `kubectl` ao cluster:**
+
+```
+aws eks update-kubeconfig --region us-east-1 --name microservices-cluster
+```
+
+**2. Crie o Secret com as credenciais da AWS.** O serviço lê a SQS e grava no DynamoDB, e a role dos nós não dá essa permissão ao pod. O comando lê as credenciais do seu perfil e não as mostra na tela (troque `NOME_DO_PERFIL`):
+
+```
+$ak = aws configure get aws_access_key_id --profile NOME_DO_PERFIL
+$sk = aws configure get aws_secret_access_key --profile NOME_DO_PERFIL
+$st = aws configure get aws_session_token --profile NOME_DO_PERFIL
+kubectl create secret generic analytics-service-secret -n microservices "--from-literal=AWS_ACCESS_KEY_ID=$ak" "--from-literal=AWS_SECRET_ACCESS_KEY=$sk" "--from-literal=AWS_SESSION_TOKEN=$st"
+Remove-Variable ak,sk,st
+```
+
+No AWS Academy as credenciais expiram a cada sessão. Quando renovar o laboratório, apague o Secret (`kubectl delete secret analytics-service-secret -n microservices`), crie de novo e reinicie o Deployment (`kubectl rollout restart deployment/analytics-service -n microservices`).
+
+**3. Aplique os manifestos:**
+
+```
+kubectl apply -f k8s/
+```
+
+**4. Confira:**
+
+```
+kubectl get pods -n microservices
+kubectl get hpa -n microservices
+kubectl logs deploy/analytics-service -n microservices
+```
+
+Nos logs aparecem `Found credentials in environment variables` e `Iniciando o worker SQS...`. Ao chegar uma mensagem na fila, aparece `Evento ... salvo no DynamoDB.`
+
+**Escalabilidade:** o HPA usa a CPU porque, no AWS Academy, ferramentas como o KEDA não funcionam (não é possível criar roles do IAM). Quando a fila enche, o serviço processa mais mensagens, a CPU sobe e o HPA adiciona pods.
+
+> Na conta do grupo, a fila é a `evaluation-events` e a tabela do DynamoDB também se chama `evaluation-events` (chave `event_id`, tipo texto).
